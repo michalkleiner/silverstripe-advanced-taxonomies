@@ -6,14 +6,18 @@ use Chrometoaster\AdvancedTaxonomies\Forms\GridFieldAddTagsAutocompleter;
 use Chrometoaster\AdvancedTaxonomies\Forms\GridFieldOrderableRows;
 use Chrometoaster\AdvancedTaxonomies\Generators\PluralGenerator;
 use Chrometoaster\AdvancedTaxonomies\Generators\URLSegmentGenerator;
+use SilverStripe\Admin\ModelAdmin;
 use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Forms\FieldList;
+use SilverStripe\Forms\GridField\GridField;
 use SilverStripe\Forms\GridField\GridFieldAddExistingAutocompleter;
 use SilverStripe\Forms\GridField\GridFieldAddNewButton;
+use SilverStripe\Forms\GridField\GridFieldConfig_Base;
 use SilverStripe\Forms\GridField\GridFieldDataColumns;
 use SilverStripe\Forms\GridField\GridFieldDeleteAction;
 use SilverStripe\Forms\GridField\GridFieldEditButton;
+use SilverStripe\Forms\GridField\GridFieldPaginator;
 use SilverStripe\Forms\LiteralField;
 use SilverStripe\Forms\NumericField;
 use SilverStripe\Forms\OptionsetField;
@@ -382,7 +386,45 @@ class TaxonomyTerm extends DataObject implements PermissionProvider
             $requiredTypesTab->insertBefore('RequiredTypes', $lineBreak);
         }
 
+        // Add a list of tagged data objects
+        $taggedObjects = $this->getTaggedDataObjects();
+        if ($this->exists() && $taggedObjects->count()) {
+            //$taggedTab = $fields->findOrMakeTab('Root.Tagged');
+            $fields->addFieldToTab(
+                'Root.Tagged',
+                GridField::create(
+                    'TaggedObjects',
+                    'Objects',
+                    $taggedObjects,
+                    $taggedGridConf = GridFieldConfig_Base::create()
+                )
+            );
 
+            // Customise the GridField's data columns and field castings
+            $taggedGridConf->getComponentByType(GridFieldDataColumns::class)
+                ->setDisplayFields(
+                    [
+                        'ID'            => 'ID',
+                        'singular_name' => 'Object class name',
+                        'Title'         => 'Title',
+                        'LinkedThrough' => 'Relation',
+                        'CMSLink'       => 'Edit',
+                    ]
+                )
+                ->setFieldCasting(
+                    [
+                        'CMSLink' => 'HTMLFragment->RAW',
+                    ]
+                );
+
+            // Increase the amount of items shown per page to 100
+            $taggedGridConf->getComponentByType(GridFieldPaginator::class)
+                ->setItemsPerPage(100);
+        }
+
+
+
+        // Reorder
         if (!$this->ParentID && isset($termsTab)) {
             // reorder Tabs so Terms tab appears at the last position
             $fields->removeFieldFromTab('Root', ['Terms']);
@@ -895,5 +937,115 @@ HTML;
         }
 
         return parent::inferReciprocalComponent($remoteClass, $remoteRelation);
+    }
+
+
+    /**
+     * @throws \ReflectionException
+     * @return ArrayList
+     */
+    protected function getTaggedDataObjects()
+    {
+        $termID = $this->ID;
+
+        $list = ArrayList::create();
+
+        $classes = ClassInfo::subclassesFor(DataObject::class);
+
+        $relations = ['has_one', 'has_many', 'many_many'];
+
+        foreach ($classes as $class) {
+
+            // exclude self as terms are assigned to terms via hierarchy
+            if ($class === self::class) {
+                continue;
+            }
+
+            foreach ($relations as $relation) {
+                $relationCandidates = Config::inst()->get($class, $relation);
+                if (count($relationCandidates)) {
+                    foreach ($relationCandidates as $field => $fieldType) {
+                        if ($fieldType === self::class) {
+                            $filterField = $field . ($relation === 'has_one' ? '' : '.') . 'ID';
+                            $items       = DataObject::get($class)->filter($filterField, $termID);
+
+                            $items->each(function ($item) use ($list, $field, $relation) {
+                                if (get_class($item) == DataObjectTaxonomyTerm::class) {
+                                    $owner = $item->OwnerObject();
+                                    $fieldName = 'Tags';
+                                    $relationName = 'many_many_through';
+                                } else {
+                                    $owner = $item;
+                                    $fieldName = $field;
+                                    $relationName = $relation;
+                                }
+
+
+                                $cmsLink = '';
+                                if ($owner->hasMethod('CMSEditLink')) {
+                                    $cmsLink = $owner->CMSEditLink();
+                                } else {
+                                    // See if an ModelAdmin is managing the owner data object
+                                    $cmsLink = self::get_cms_link($owner);
+                                }
+
+                                if ($cmsLink) {
+                                    $cmsLink
+                                        = sprintf(
+                                            '<a href="%s" target="_blank" class="at-link-external">Edit</a>',
+                                            $cmsLink
+                                        );
+                                }
+
+                                $owner->UniqueID = sprintf(
+                                    '%s-%s-%s-%s',
+                                    $owner->ClassName,
+                                    $owner->ID,
+                                    $fieldName,
+                                    $relationName
+                                );
+                                $owner->LinkedThrough = sprintf('%s (%s)', $fieldName, $relationName);
+                                $owner->CMSLink = $cmsLink;
+
+                                $list->push($owner);
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove duplicates
+        $list->removeDuplicates('UniqueID');
+
+        return $list;
+    }
+
+
+    /**
+     * Helper function for geting a CMSEditingLink if the given $object is managed through a ModelAdmin
+     *
+     * @param DataObject $object
+     * @throws \ReflectionException
+     * @return string
+     */
+    private static function get_cms_link(DataObject $object)
+    {
+        $modelAdmins = ClassInfo::subclassesFor(ModelAdmin::class, false);
+        foreach ($modelAdmins as $admin) {
+            foreach (singleton($admin)->getManagedModels() as $modelClass => $spec) {
+                if ($modelClass == $object->getClassName()) {
+                    $admin             = singleton($admin);
+                    $admin->modelClass = $modelClass;
+                    $admin->init();
+                    $gridFieldName = str_replace('\\', '-', $modelClass);
+                    $gridField     = $admin->getEditForm()->Fields()->dataFieldByName($gridFieldName);
+                    $linkedURL     = $gridField->Link();
+                    $subURL        = '/item/' . $object->ID . '/';
+
+                    return $linkedURL . $subURL . '/edit';
+                }
+            }
+        }
     }
 }

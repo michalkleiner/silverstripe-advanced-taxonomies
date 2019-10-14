@@ -32,6 +32,7 @@ use SilverStripe\ORM\Hierarchy\Hierarchy;
 use SilverStripe\Security\Permission;
 use SilverStripe\Security\PermissionProvider;
 use SilverStripe\Versioned\GridFieldArchiveAction;
+use SilverStripe\VersionedAdmin\ArchiveAdmin;
 use UndefinedOffset\SortableGridField\Forms\GridFieldSortableRows;
 
 /**
@@ -1033,6 +1034,11 @@ HTML;
     {
         $modelAdmins = ClassInfo::subclassesFor(ModelAdmin::class, false);
         foreach ($modelAdmins as $admin) {
+            // Exclude ArchiveAdmin as it is a special ModelAdmin which handles all DataObject with Versioned extension
+            if (is_a($admin, ArchiveAdmin::class, true)) {
+                continue;
+            }
+
             foreach (singleton($admin)->getManagedModels() as $modelClass => $spec) {
                 if ($modelClass == $object->getClassName()) {
                     $admin             = singleton($admin);
@@ -1040,10 +1046,12 @@ HTML;
                     $admin->init();
                     $gridFieldName = str_replace('\\', '-', $modelClass);
                     $gridField     = $admin->getEditForm()->Fields()->dataFieldByName($gridFieldName);
-                    $linkedURL     = $gridField->Link();
-                    $subURL        = '/item/' . $object->ID . '/';
+                    if ($gridField) {
+                        $linkedURL = $gridField->Link();
+                        $subURL    = '/item/' . $object->ID . '/';
 
-                    return $linkedURL . $subURL . '/edit';
+                        return $linkedURL . $subURL . '/edit';
+                    }
                 }
             }
         }

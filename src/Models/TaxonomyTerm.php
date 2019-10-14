@@ -1039,6 +1039,11 @@ HTML;
                 continue;
             }
 
+            $reflectionclass = new \ReflectionClass($admin);
+            if ($reflectionclass->isAbstract()) {
+                continue;
+            }
+
             foreach (singleton($admin)->getManagedModels() as $modelClass => $spec) {
                 if ($modelClass == $object->getClassName()) {
                     $admin             = singleton($admin);
